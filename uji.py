@@ -1,27 +1,30 @@
-"""Uji cepat mesin perhitungan tanpa perlu berkas Excel.
+"""Uji cepat mesin perhitungan tanpa berkas nyata.
 
 Jalankan: python uji.py
 """
+import pandas as pd
+
 import insentif as ins
 
 
-def faktur_contoh():
-    """Dua faktur service: satu Rp 300rb (Andi/Budi), satu Rp 100rb (Andi/Citra)."""
-    def baris(no, kat_barang, nilai, sales, admin, member=True):
-        return {ins.kunci("TGL FAKTUR"): __import__("datetime").date(2026, 8, 5),
-                ins.kunci("NO FAKTUR"): no,
-                ins.kunci("KATEGORI BARANG"): kat_barang,
-                ins.kunci("KATEGORI PENJUALAN"): "SERVICE HP",
-                ins.kunci("KATEGORI PELANGGAN"):
-                    "Member Reguler" if member else "Umum",
-                ins.kunci("TOTAL HARGA"): nilai,
-                ins.kunci("YANG MENYERAHKAN/MENJUAL"): sales,
-                ins.kunci("NAMA ADMIN"): admin}
-    return [
-        baris("F1", "JASA", 300_000, "Andi", "Budi"),
-        baris("F1", "SPAREPART", 50_000, "Andi", "Budi"),
-        baris("F2", "JASA", 100_000, "Andi", "Citra", member=False),
-    ]
+def contoh():
+    """Dua faktur service pada satu cabang."""
+    return pd.DataFrame([
+        # F1: jasa 300rb, penyerah Andi, admin Budi
+        ("2026-08-05", "F1", "Klender", "Member Reguler", "SERVICE HP",
+         "JASA", 300_000, "Andi", "Budi", "Tono"),
+        # sparepart pada faktur service: tidak masuk pool
+        ("2026-08-05", "F1", "Klender", "Member Reguler", "SERVICE HP",
+         "SPAREPART", 50_000, "Andi", "Budi", "Tono"),
+        # F2: jasa 100rb, penyerah Andi, admin Citra, pelanggan umum
+        ("2026-08-06", "F2", "Klender", "Umum", "SERVICE HP",
+         "JASA", 100_000, "Andi", "Citra", "Tono"),
+        # F3: cabang lain, admin kosong -> seluruh bobot ke penyerah
+        ("2026-08-07", "F3", "Bintara", "Member Reguler", "SERVICE LAPTOP",
+         "JASA", 200_000, "Dina", "", "Tono"),
+    ], columns=["tanggal", "no_faktur", "cabang", "kategori_pelanggan",
+                "kategori_penjualan", "kategori_barang", "total_harga",
+                "penyerah", "admin", "teknisi"])
 
 
 def cek(nama, dapat, harap):
@@ -31,33 +34,58 @@ def cek(nama, dapat, harap):
 
 
 def main():
-    f = faktur_contoh()
-    h = ins.hitung(f, 8, 2026, pct_teknisi=30, pct_pool=2.0,
-                   porsi={"sales": 50, "admin": 30, "store_leader": 20})
-    lulus = [
-        # 300rb + 100rb, sparepart tidak ikut
-        cek("omset jasa", h["omset_jasa"], 400_000),
-        cek("omset jasa member", h["omset_jasa_member"], 300_000),
-        cek("sparepart faktur service", h["omset_sparepart_service"], 50_000),
+    df = ins.siapkan(contoh())
+    lulus = []
+
+    # tanggal ISO tidak boleh terbaca tahun-HARI-bulan
+    lulus.append(cek("semua faktur di bulan 8", int((df["bulan"] == 8).sum()), 4))
+
+    h = ins.hitung(df, 8, 2026, cabang=["Klender"], pct_teknisi=30,
+                   pct_pool=2.0, porsi_front_liner=80, porsi_store_leader=20,
+                   bobot_penyerah=60)
+    lulus += [
+        cek("omset jasa Klender", h["omset_jasa"], 400_000),
+        cek("sparepart tidak ikut", h["omset_sparepart_service"], 50_000),
         cek("bagi hasil MFlash 70%", h["bagi_hasil_mflash"], 280_000),
         cek("pool 2%", h["pool"], 5_600),
-        cek("bagian sales 50%", h["bagian"]["sales"], 2_800),
-        cek("bagian admin 30%", h["bagian"]["admin"], 1_680),
+        cek("bagian front liner 80%", h["bagian"]["front_liner"], 4_480),
         cek("bagian store leader 20%", h["bagian"]["store_leader"], 1_120),
-        # Andi menyerahkan dua-duanya -> seluruh jatah sales
-        cek("Andi (sales) dapat semua", h["sales"][0]["insentif"], 2_800),
-        # Budi 300rb dari 400rb -> 75% dari 1.680
-        cek("Budi (admin) 75%", h["admin"][0]["insentif"], 1_260),
-        cek("Citra (admin) 25%", h["admin"][1]["insentif"], 420),
-        # skema lama: 2% x (300rb x 70%)
-        cek("skema lama", h["skema_lama"], 4_200),
+    ]
+    # kredit: Andi 60% x 400rb = 240rb; Budi 40% x 300rb = 120rb;
+    #         Citra 40% x 100rb = 40rb. Total 400rb = omset jasa.
+    kredit = {r["nama"]: r["kredit_omset"] for r in h["front_liner"]}
+    lulus += [
+        cek("kredit Andi", kredit["Andi"], 240_000),
+        cek("kredit Budi", kredit["Budi"], 120_000),
+        cek("kredit Citra", kredit["Citra"], 40_000),
+        cek("jumlah kredit = omset jasa", sum(kredit.values()), 400_000),
+    ]
+    ins_fl = {r["nama"]: r["insentif"] for r in h["front_liner"]}
+    lulus += [
+        cek("insentif Andi 60%", ins_fl["Andi"], 2_688),
+        cek("insentif Budi 30%", ins_fl["Budi"], 1_344),
+        cek("insentif Citra 10%", ins_fl["Citra"], 448),
+        cek("skema lama 2% x (300rb x 70%)", h["skema_lama"], 4_200),
     ]
 
-    hanya_member = ins.hitung(f, 8, 2026, hanya_member=True, pct_pool=2.0)
-    lulus.append(cek("basis member saja", hanya_member["omset_jasa"], 300_000))
+    # admin kosong: seluruh bobot ke penyerah
+    hb = ins.hitung(df, 8, 2026, cabang=["Bintara"], pct_pool=2.0)
+    kb = {r["nama"]: r["kredit_omset"] for r in hb["front_liner"]}
+    lulus.append(cek("Dina dapat kredit penuh", kb["Dina"], 200_000))
 
-    kosong = ins.hitung(f, 7, 2026)
-    lulus.append(cek("bulan tanpa data", kosong["omset_jasa"], 0))
+    # dua cabang: bagian store leader dibagi rata
+    h2 = ins.hitung(df, 8, 2026, pct_pool=2.0, porsi_front_liner=80,
+                    porsi_store_leader=20)
+    lulus += [
+        cek("omset dua cabang", h2["omset_jasa"], 600_000),
+        cek("jumlah cabang", len(h2["store_leader"]), 2),
+        cek("store leader per cabang",
+            h2["store_leader"][0]["insentif"], 840),
+    ]
+
+    hm = ins.hitung(df, 8, 2026, cabang=["Klender"], hanya_member=True)
+    lulus.append(cek("basis member saja", hm["omset_jasa"], 300_000))
+    lulus.append(cek("bulan tanpa data", ins.hitung(df, 7, 2026)["omset_jasa"], 0))
 
     print()
     print("SEMUA UJI LULUS" if all(lulus) else "ADA UJI YANG GAGAL")
